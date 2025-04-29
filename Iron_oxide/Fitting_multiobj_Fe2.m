@@ -1,0 +1,143 @@
+%% This script finds pareto front using genetic algorithm
+restoredefaultpath
+clear
+clc
+addpath(fullfile("..","functions"))
+is_test = false;
+target_NP = "Fe";
+situ = "ex2";
+switch target_NP
+    case "Fe"
+        reduced_factor = 1;
+        lbub = [-100,0; ...lnqfqb
+            -100,700; ...lnqeqb
+            4,inf; ...alpha+4
+            0,inf; ...kappa_a*rho_{1,inf}
+            0,inf; ...kappa_a*sigma_s/D_1
+            0.3, 0.4; ...sigma_s
+            0,inf; ...supersaturation ratio
+            1,2 ... shape index
+            ]';
+        % --- new data
+        npdata = readmatrix("iron_oxide_ex_situ_new.csv");
+        r3data = npdata(2:end,:).^3;
+        for ii = 1:size(r3data, 2)
+            rdata = npdata(2:end,ii);
+            r3 = r3data(:,ii);
+            [~, TF] = rmoutliers(r3);
+            rdata(TF) = nan;
+            npdata(2:end,ii) = rdata;
+        end
+        nbin = [];
+        smooth_window = [5, 4];
+        IP_method = "makima";
+end
+if is_test == true
+    dirName = "test_results";
+    fileName = string(datetime("now",Format = "yyMMdd")) + "test";
+    popSize = 2^3;
+    MaxGen = 1e2;
+    FunTol = 1e-3;
+else
+    dirName = "?cpu";
+    fileName = [];
+    popSize = 2^8;
+    MaxGen = 1e4;
+    FunTol = 1e-6;
+end
+%%
+expdata = Preprocessing_ex_situ(npdata,"experiment_r3_iron_oxide_right.mat");% -----------new data
+%% Initial Setting
+galbub = [-6, -1; -6  ,6  ; lbub(1,3),10; 0,10; 1e-4,1e-1; lbub(1,6),lbub(2,6); 0,100;  1, 2]'; % non-spherical theory
+
+weights = ones(1, numel(expdata.timedata));
+numStartPoints = 1;
+lent = numel(expdata.tval);
+CCCCCCCC = {1, 2, 3, 4, 5, 6, 7, 8};
+CCCCCCTT = {1, 2, 3, 4, 5, 6, 7:6+lent, 7+lent:6+2*lent};
+
+other_opt = struct( ...
+    'indices',{CCCCCCTT}, ...
+    'IP_method', IP_method, ...
+    'factor', reduced_factor, ...
+    'loss',"mse", ...
+    'scale',"minmax", ...
+    'collect',"mean", ...
+    'loss_var',"mse", ...
+    'scale_var',"minmax", ...
+    'weights',weights, ...
+    'track',"every_100", ...
+    'startPoints',numStartPoints, ...
+    'smooth_window', smooth_window);
+ga_opt = optimoptions("ga", ...
+    CreationFcn = @(g, f, o) gacuGuess3(g, f, o, expdata, other_opt, situ), ...
+    Display = "iter", ...
+    MaxGenerations = MaxGen, ...
+    InitialPopulationMatrix = [], ...
+    PopulationSize = popSize, ...
+    UseParallel = true);
+gamulti_opt = optimoptions("gamultiobj", ...
+    Display = "iter", ...
+    MaxGenerations = MaxGen, ...
+    PopulationSize = popSize, ...
+    FunctionTolerance = FunTol, ...
+    UseParallel = true);
+%% (ga) Fit Variance
+ga_opt.FunctionTolerance = 1e-10;
+[varfit, varcost, varresults] = optim_and_save_in(...
+    @(x)Var_loss(x, expdata, other_opt), ... 
+    [], ...
+    [], ...
+    change_TC(galbub(1,:), CCCCCCCC, other_opt.indices, []), ...
+    change_TC(galbub(2,:), CCCCCCCC, other_opt.indices, []), ...
+    ga_opt, other_opt, dirName, fileName);
+%% (ga) Fit jn
+ga_opt.FunctionTolerance = 1e-6;
+[jnfit, jncost, jnresults] = optim_and_save_in(...
+    @(x)Jn_loss(x, expdata, other_opt), ...
+    [], ...
+    [], ...
+    change_TC(galbub(1,:), CCCCCCCC, other_opt.indices, []), ...
+    change_TC(galbub(2,:), CCCCCCCC, other_opt.indices, []), ...
+    ga_opt, other_opt, dirName, fileName);
+%% (gamultiobj) Fit Jn & Variance simultaneousely 
+% with x0 set by jnfit and varfit
+[x0, ia] = unique(varresults.population,'Rows');
+[~, idx] = mink(varresults.scores(ia), floor(popSize/2));
+x0var = x0(idx,:);
+[x0, ia] = unique(jnresults.population,'Rows');
+[~, idx] = mink(jnresults.scores(ia), floor(popSize/2));
+x0jn = x0(idx,:);
+gamulti_opt.InitialPopulationMatrix = [x0var; x0jn];
+gamulti_opt.CreationFcn = @(gl, ff, o)gacuGuess3(gl, ff, o, expdata, other_opt, situ);
+[jnvarfit1, jnvarcost1, jnvarresults1] = optim_and_save_in( ...
+    @(x)JnVar_loss(x, expdata, other_opt), ...
+    [], ...
+    [], ...
+    change_TC(galbub(1,:), CCCCCCCC, other_opt.indices, []), ...
+    change_TC(galbub(2,:), CCCCCCCC, other_opt.indices, []), ...
+    gamulti_opt, other_opt, dirName, fileName);
+%% functions
+function cost = Jn_loss(x, expdata, options)
+    expdata_new = r2n_optim(expdata, x(options.indices{6}), options.IP_method, options.smooth_window);
+    cost = Calculate_Cost_Ex_situ_fast2(x, expdata_new, options);
+end
+function cost = Var_loss(x, expdata, options)
+    sigmas = unique(x(options.indices{6}));
+    expdata_new = r2n_optim(expdata, sigmas, options.IP_method, options.smooth_window);
+    [~, var_theory] = Calculate_Mean_Var_Ex_situ2(x, expdata_new, options);
+    var_exp = options.factor*expdata_new.smooth_varnumberdata;
+    loss = options.loss_var;
+    scale = options.scale_var;
+    cost = lossReg(var_theory, var_exp, loss, scale);
+end
+function cost = JnVar_loss(x, expdata, options)
+    sigmas = unique(x(options.indices{6}));
+    expdata_new = r2n_optim(expdata, sigmas, options.IP_method, options.smooth_window);
+    cost(1) = Calculate_Cost_Ex_situ_fast2(x, expdata_new, options);
+    [~, var_theory] = Calculate_Mean_Var_Ex_situ2(x, expdata_new, options);
+    var_exp = options.factor*expdata_new.smooth_varnumberdata;
+    loss = options.loss_var;
+    scale = options.scale_var;
+    cost(2) = lossReg(var_theory, var_exp, loss, scale);
+end
